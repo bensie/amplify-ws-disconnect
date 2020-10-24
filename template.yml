@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: GraphQL API Stack
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: 10
+    MemorySize: 128
+Resources:
+  GraphQLAPI:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      AuthenticationType: API_KEY
+      Name: !Sub ${AWS::StackName}-GraphQL
+  APIKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId: !GetAtt GraphQLAPI.ApiId
+  Schema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLAPI.ApiId
+      Definition: !Sub |-
+        type Widget {
+          id: ID!
+          name: String!
+        }
+
+        type Query {
+          widget(id: ID!): Widget
+        }
+
+        type Mutation {
+          updateWidget(id: ID!, name: String): Widget
+        }
+
+        type Subscription {
+          widgetUpdated(id: ID!): Widget @aws_subscribe(mutations: ["updateWidget"])
+        }
+  MainResolverDataSource:
+    Type: AWS::AppSync::DataSource
+    DependsOn: Schema
+    Properties:
+      ApiId: !GetAtt GraphQLAPI.ApiId
+      LambdaConfig:
+        LambdaFunctionArn: !GetAtt ResolverFunction.Arn
+      Name: !Sub MainResolverDataSource${GraphQLAPI.ApiId}
+      ServiceRoleArn: !GetAtt ResolverServiceRole.Arn
+      Type: AWS_LAMBDA
+  ResolverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-Resolver
+      Handler: index.handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AWSXrayWriteOnlyAccess
+      InlineCode: !Sub |-
+        exports.handler = (event, context, callback) => {
+          console.log(JSON.stringify(event))
+          switch(event.info.fieldName) {
+            case "widget":
+              callback(null, {id:"123",name:"My Widget"})
+              break
+            case "updateWidget":
+              callback(null, event.arguments)
+              break
+            case "widgetUpdated":
+              callback(null, null)
+              break
+            default:
+              callback("Unknown field, can't resolve " + event.info.fieldName, null)
+              break
+          }
+        }
+  ResolverServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: appsync.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: allow-appsync-to-invoke-lambda
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:invokeFunction
+                Resource:
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-Resolver
+  QueryWidget:
+    Type: AWS::AppSync::Resolver
+    DependsOn: MainResolverDataSource
+    Properties:
+      ApiId: !GetAtt GraphQLAPI.ApiId
+      TypeName: Query
+      FieldName: widget
+      DataSourceName: !Sub MainResolverDataSource${GraphQLAPI.ApiId}
+      ResponseMappingTemplate: |
+        #if($ctx.result && $ctx.result.errorMessage)
+          $util.error($ctx.result.errorMessage, $ctx.result.errorType, {}, $ctx.result.errorInfo)
+        #else
+          $util.toJson($ctx.result)
+        #end
+  MutationUpdateWidget:
+    Type: AWS::AppSync::Resolver
+    DependsOn: MainResolverDataSource
+    Properties:
+      ApiId: !GetAtt GraphQLAPI.ApiId
+      TypeName: Mutation
+      FieldName: updateWidget
+      DataSourceName: !Sub MainResolverDataSource${GraphQLAPI.ApiId}
+      ResponseMappingTemplate: |
+        #if($ctx.result && $ctx.result.errorMessage)
+          $util.error($ctx.result.errorMessage, $ctx.result.errorType, {}, $ctx.result.errorInfo)
+        #else
+          $util.toJson($ctx.result)
+        #end
+  SubscriptionAuthorizationWidgetUpdated:
+    Type: AWS::AppSync::Resolver
+    DependsOn: MainResolverDataSource
+    Properties:
+      ApiId: !GetAtt GraphQLAPI.ApiId
+      TypeName: Subscription
+      FieldName: widgetUpdated
+      DataSourceName: !Sub MainResolverDataSource${GraphQLAPI.ApiId}
+      ResponseMappingTemplate: |
+        null
+Outputs:
+  GraphQLAPIUrl:
+    Value: !GetAtt GraphQLAPI.GraphQLUrl
+  APIKey:
+    Value: !GetAtt APIKey.ApiKey
+  Region:
+    Value: !Ref AWS::Region
